@@ -98,7 +98,7 @@ def _truthy(value: object) -> bool:
 def _safe_combo_get(d: Mapping[str, float], combo_name: str) -> float:
     """Read a PyNite result dictionary; return 0.0 if the key is missing."""
     try:
-        return float(d.get(combo_name, 0.0))  # PyNite result containers behave dict-like
+        return float(d.get(combo_name, 0.0))
     except AttributeError:
         try:
             return float(d[combo_name])
@@ -162,9 +162,6 @@ def _support_flags_for_nodes(model: ModelData, options: PyNiteRunOptions) -> dic
             if _truthy(row.get("is_fixed_support", False))
         )
 
-    # Identify nodes connected only to truss elements. Their rotations have no
-    # physical meaning in our mixed model, so we restrain rotations to avoid
-    # unused rotational DOFs. This mirrors the educational solver convention.
     truss_only_nodes: set[int] = set()
     if options.auto_fix_truss_only_rotations:
         incident: dict[int, list[str]] = {int(n): [] for n in nodes["node_id"]}
@@ -194,13 +191,7 @@ def build_pynite_model(
     case_name: str = "Case_1",
     combo_name: Optional[str] = None,
 ):
-    """
-    Build and return a PyNite FEModel3D plus translated metadata.
-
-    The returned tuple is:
-
-        pynite_model, working_model, section_table, crossing_diagnostics
-    """
+    """Build and return a PyNite FEModel3D plus translated metadata."""
     _require_pynite()
     options = options or PyNiteRunOptions()
     combo_name = combo_name or case_name
@@ -218,12 +209,9 @@ def build_pynite_model(
 
     fe = FEModel3D()
 
-    # Nodes
     for _, n in working_model.nodes.iterrows():
         fe.add_node(_pynite_node_name(int(n["node_id"])), float(n["x"]), float(n["y"]), float(n["z"]))
 
-    # Materials. Most rows are steel, but keeping a map makes the adapter robust
-    # if a future CSV varies E/G by element.
     material_names: dict[tuple[float, float], str] = {}
     for _, e in working_model.elements.iterrows():
         E = float(e.get("E_N_per_mm2", 210_000.0) or 210_000.0)
@@ -235,7 +223,6 @@ def build_pynite_model(
             fe.add_material(mat_name, E=E, G=G, nu=nu, rho=0.0)
             material_names[key] = mat_name
 
-    # Sections and members.
     section_records = []
     for _, e in working_model.elements.iterrows():
         props = section_properties_for_element(e, solver_options)
@@ -259,9 +246,6 @@ def build_pynite_model(
             sec_name,
         )
         if str(e.get("element_type", "frame")).lower() == "truss" and options.release_truss_end_bending:
-            # Approximate a truss/bar by releasing both bending rotations at both
-            # ends. Do not release torsion/axial DOFs at both ends; that can
-            # create member-level instabilities.
             fe.def_releases(
                 member_name,
                 Dxi=False, Dyi=False, Dzi=False, Rxi=False, Ryi=True, Rzi=True,
@@ -274,7 +258,6 @@ def build_pynite_model(
             **props,
         })
 
-    # Supports
     for node_id, flags in _support_flags_for_nodes(working_model, options).items():
         fe.def_support(
             _pynite_node_name(node_id),
@@ -282,7 +265,6 @@ def build_pynite_model(
             support_RX=flags[3], support_RY=flags[4], support_RZ=flags[5],
         )
 
-    # Loads
     label_to_node = dict(zip(working_model.nodes["node_label"], working_model.nodes["node_id"]))
     loads_used = []
     for lr in load_rows:
@@ -343,6 +325,7 @@ def analyze_pynite_model(
         "section_mode": options.section_mode,
         "crossing_diagonal_mode": options.crossing_diagonal_mode,
         "truss_representation": "pin-ended PyNite member with local Ry/Rz releases",
+        "axial_sign_convention": "converted to keratia convention: positive=tension, negative=compression",
     }])
 
     return {
@@ -453,7 +436,11 @@ def pynite_member_forces_dataframe(
         sigma_candidates = []
         for x in xs:
             try:
-                N = float(m.axial(x, combo_name))
+                # PyNite's member.axial(...) sign is opposite to the convention
+                # used throughout this project. Convert immediately so every
+                # downstream table/plot keeps the keratia convention:
+                #     positive = tension, negative = compression.
+                N = -float(m.axial(x, combo_name))
             except Exception:
                 N = 0.0
             try:
@@ -473,7 +460,6 @@ def pynite_member_forces_dataframe(
             else:
                 for y in (-cy, cy):
                     for z in (-cz, cz):
-                        # Same approximate stress form as the educational solver.
                         sigma_candidates.append(N / A + Mz * y / Iz - My * z / Iy)
 
         N_arr = np.asarray(N_vals, dtype=float)
@@ -481,9 +467,6 @@ def pynite_member_forces_dataframe(
         Mz_arr = np.asarray(Mz_vals, dtype=float)
         sig_arr = np.asarray(sigma_candidates, dtype=float)
 
-        # For nodal-load-only cases N should usually be almost constant. Use the
-        # average for signed axial-force reporting so tiny endpoint noise does not
-        # flip classifications.
         N_signed = float(np.nanmean(N_arr)) if len(N_arr) else 0.0
         max_abs_N = float(np.nanmax(np.abs(N_arr))) if len(N_arr) else abs(N_signed)
         max_abs_My = float(np.nanmax(np.abs(My_arr))) if len(My_arr) else 0.0
