@@ -6,3 +6,4 @@ ipykernel
 nbformat
 openpyxl
 pyvista
+PyniteFEA
