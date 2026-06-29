@@ -2,28 +2,11 @@
 reporting.py
 ============
 
-Stage-1 reporting helpers for the keratia tower model.
+Grouped reporting helpers for the keratia tower model.
 
-These helpers are intentionally separate from the stiffness solver. They do not
-change the analysis; they only enrich result tables with reporting metadata and
-export grouped XLSX workbooks that are easier to read than one large alternating
-element table.
-
-Key ideas
----------
-
-1. region/subregion
-   Human-facing grouping for member-force tables, for example:
-       horn_xpos, horn_xneg, top_square, legs_and_faces, bottom_square
-
-2. physical_member_id
-   A reporting-only key that groups split FE sub-elements back into one real
-   physical steel member. This is the "continuous for reporting" view.
-
-   The solver may still split a frame member into several finite elements so
-   trusses can connect at intermediate nodes. That is correct for analysis.
-   For review, however, it is often more useful to aggregate those sub-elements
-   and ask: "what is the worst demand anywhere along this one piece of steel?"
+The functions in this module do not alter the analysis model. They enrich result
+tables with reporting metadata and export grouped XLSX workbooks that are easier
+to inspect than one large all-elements table.
 """
 
 from __future__ import annotations
@@ -33,7 +16,6 @@ from typing import Mapping, Optional, Sequence
 
 import numpy as np
 import pandas as pd
-
 
 REPORTING_REGIONS = [
     "horn_xneg",
@@ -67,7 +49,7 @@ DEFAULT_GROUPED_DISPLAY_COLS = [
 
 
 def _x_side_from_labels(start_label: str, end_label: str, fallback: str = "") -> str:
-    """Infer x-positive/x-negative side from canonical node/member labels."""
+    """Infer x-positive/x-negative side from canonical labels."""
     txt = f"{start_label} {end_label} {fallback}".lower()
     if "xpos" in txt:
         return "xpos"
@@ -94,7 +76,8 @@ def infer_region_subregion(row: pd.Series) -> tuple[str, str]:
         return "top_square", "square_frame" if etype == "frame" else "top_square_truss"
 
     if (
-        "high_xpos" in labels or "high_xneg" in labels
+        "high_xpos" in labels
+        or "high_xneg" in labels
         or "load_point" in role
         or "upper_truss" in role
         or "inserted_upper_truss" in role
@@ -112,12 +95,7 @@ def infer_region_subregion(row: pd.Series) -> tuple[str, str]:
             return region, "horn_diagonal_truss"
         return region, "horn_truss"
 
-    if (
-        "leg" in role
-        or "face" in role
-        or "inscribed" in role
-        or "node_to" in role
-    ):
+    if "leg" in role or "face" in role or "inscribed" in role or "node_to" in role:
         if etype == "frame":
             return "legs_and_faces", "leg_frame"
         if "xpos" in role:
@@ -137,12 +115,7 @@ def infer_region_subregion(row: pd.Series) -> tuple[str, str]:
 
 
 def infer_physical_member_id(row: pd.Series) -> str:
-    """
-    Infer a reporting key for a real physical piece of steel.
-
-    Split elements of the same original frame/truss usually share
-    parent_element_id. Unsplit elements fall back to their own element_id.
-    """
+    """Infer the reporting key that groups split FE elements into one steel piece."""
     etype = str(row.get("element_type", "frame")).lower()
     parent = row.get("parent_element_id", np.nan)
     prefix = "F" if etype == "frame" else "T"
@@ -158,11 +131,7 @@ def infer_physical_member_id(row: pd.Series) -> str:
 
 
 def add_reporting_metadata(elements: pd.DataFrame) -> pd.DataFrame:
-    """
-    Ensure an element table contains region, subregion, and physical_member_id.
-
-    Existing nonblank values are preserved. Missing/blank values are inferred.
-    """
+    """Ensure an element table contains region, subregion, and physical_member_id."""
     out = elements.copy()
     for col in ["region", "subregion", "physical_member_id"]:
         if col not in out.columns:
@@ -178,62 +147,61 @@ def add_reporting_metadata(elements: pd.DataFrame) -> pd.DataFrame:
 
     blank = out["physical_member_id"].isna() | out["physical_member_id"].astype(str).str.strip().eq("")
     out.loc[blank, "physical_member_id"] = out.loc[blank].apply(infer_physical_member_id, axis=1)
-
     return out.drop(columns=["_region", "_subregion"])
 
 
 def enrich_result_for_reporting(result: Mapping[str, object]) -> dict:
-    """
-    Return a shallow copy of a solve result with reporting metadata merged in.
-
-    This lets the current solver remain untouched: it may output member_force
-    rows without region/physical-member fields, and this function adds them by
-    joining against the result's element table.
-    """
+    """Merge reporting metadata from the element table into member_forces."""
     out = dict(result)
     elements = add_reporting_metadata(pd.DataFrame(out["elements"]).copy())
     mf = pd.DataFrame(out["member_forces"]).copy()
-
-    meta_cols = [
-        "element_id",
-        "region",
-        "subregion",
-        "physical_member_id",
-    ]
-    meta = elements[meta_cols].copy()
-
-    # Drop old metadata columns if present so the merge is deterministic.
+    meta_cols = ["element_id", "region", "subregion", "physical_member_id"]
     mf = mf.drop(columns=[c for c in meta_cols if c != "element_id" and c in mf.columns], errors="ignore")
-    mf = mf.merge(meta, on="element_id", how="left")
-
+    mf = mf.merge(elements[meta_cols], on="element_id", how="left")
     out["elements"] = elements
     out["member_forces"] = mf
     return out
 
 
 def enrich_results_for_reporting(results: Mapping[str, Mapping[str, object]]) -> dict[str, dict]:
-    """Apply enrich_result_for_reporting to a model-results dictionary."""
+    """Apply enrich_result_for_reporting to every result in a dict."""
     return {name: enrich_result_for_reporting(res) for name, res in results.items()}
 
 
 def _region_sort(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Sort a reporting table by engineering region when possible.
+
+    Some summary tables, such as Region_Summary, do not have element_id or
+    physical_member_id columns. Earlier versions assumed element_id always
+    existed, which caused KeyError in grouped reporting exports. This sorter only
+    uses columns present in the specific table being sorted.
+    """
     if df.empty:
         return df.copy()
+
     out = df.copy()
     order = {name: i for i, name in enumerate(REPORTING_REGIONS)}
-    out["_region_order"] = out.get("region", "other").map(order).fillna(999).astype(int)
-    for col in ["model", "region", "subregion", "physical_member_id"]:
-        if col not in out.columns:
-            out[col] = ""
-    return (
-        out.sort_values(["model", "_region_order", "subregion", "physical_member_id", "element_id"])
-        .drop(columns=["_region_order"])
-        .reset_index(drop=True)
-    )
+    if "region" in out.columns:
+        out["_region_order"] = out["region"].map(order).fillna(999).astype(int)
+    else:
+        out["_region_order"] = 999
+
+    sort_candidates = [
+        "model",
+        "_region_order",
+        "region",
+        "subregion",
+        "physical_member_id",
+        "element_id",
+        "critical_element_id",
+    ]
+    sort_cols = [c for c in sort_candidates if c in out.columns]
+    return out.sort_values(sort_cols).drop(columns=["_region_order"]).reset_index(drop=True)
 
 
 def all_elements_grouped_table(results: Mapping[str, Mapping[str, object]]) -> pd.DataFrame:
-    """All element results sorted by engineering region/subregion."""
+    """All element result rows sorted by region/subregion."""
     results = enrich_results_for_reporting(results)
     tables = []
     for name, res in results.items():
@@ -336,13 +304,7 @@ def export_grouped_results_to_excel(
     top_n: int = 20,
     display_columns: Optional[Sequence[str]] = None,
 ) -> None:
-    """
-    Export a grouped XLSX report.
-
-    This is the Stage-1 replacement for relying on one alternating all-elements
-    sheet. It keeps `Critical_Matched` as a diagnostic but emphasizes region and
-    physical-member outputs.
-    """
+    """Export a grouped XLSX report."""
     results = enrich_results_for_reporting(results)
     out_xlsx = Path(out_xlsx)
     out_xlsx.parent.mkdir(parents=True, exist_ok=True)
@@ -355,12 +317,13 @@ def export_grouped_results_to_excel(
     for name, res in results.items():
         disp = pd.DataFrame(res["displacements"])
         mf = pd.DataFrame(res["member_forces"])
+        elems = pd.DataFrame(res["elements"])
         summary_rows.append({
             "model": name,
             "nodes": len(res["nodes"]),
-            "elements": len(res["elements"]),
-            "frame_elements": int((pd.DataFrame(res["elements"])["element_type"] == "frame").sum()),
-            "truss_elements": int((pd.DataFrame(res["elements"])["element_type"] == "truss").sum()),
+            "elements": len(elems),
+            "frame_elements": int((elems["element_type"] == "frame").sum()) if "element_type" in elems else 0,
+            "truss_elements": int((elems["element_type"] == "truss").sum()) if "element_type" in elems else 0,
             "max_translation_mm": float(disp["translation_mag_mm"].max()),
             "max_abs_Uz_mm": float(disp["Uz_mm"].abs().max()),
             "max_abs_axial_force_kN": float(mf["max_abs_N_N"].max() / 1000.0),
@@ -392,7 +355,7 @@ def export_grouped_results_to_excel(
         all_grouped[cols_existing(all_grouped, display_columns)].to_excel(writer, sheet_name="All_Elements_Grouped", index=False)
 
         for region in REPORTING_REGIONS:
-            part = all_grouped.loc[all_grouped["region"].eq(region)].copy()
+            part = all_grouped.loc[all_grouped["region"].eq(region)].copy() if "region" in all_grouped else pd.DataFrame()
             if not part.empty:
                 part[cols_existing(part, display_columns)].to_excel(writer, sheet_name=f"R_{region}"[:31], index=False)
 
