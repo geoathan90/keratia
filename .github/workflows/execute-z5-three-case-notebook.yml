@@ -30,8 +30,6 @@ jobs:
           python -m pip install nbconvert
 
       - name: Execute notebook in place
-        env:
-          MPLBACKEND: Agg
         run: |
           jupyter nbconvert \
             --to notebook \
