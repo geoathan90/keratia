@@ -1,0 +1,50 @@
+name: Execute Z5 all-pinned notebook
+
+on:
+  push:
+    paths:
+      - "notebooks/06_z5_all_pinned_comparison.ipynb"
+      - ".github/workflows/execute-z5-all-pinned-notebook.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  execute-notebook:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install nbconvert
+
+      - name: Execute notebook in place
+        run: |
+          jupyter nbconvert \
+            --to notebook \
+            --execute notebooks/06_z5_all_pinned_comparison.ipynb \
+            --inplace \
+            --ExecutePreprocessor.timeout=900
+
+      - name: Commit executed notebook
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add notebooks/06_z5_all_pinned_comparison.ipynb
+          if git diff --cached --quiet; then
+            echo "No notebook changes to commit."
+          else
+            git commit -m "Execute Z5 all-pinned comparison notebook [skip ci]"
+            git push origin HEAD:main
+          fi
